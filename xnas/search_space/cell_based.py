@@ -643,6 +643,13 @@ class NASBench201CNN(nn.Module):
         logits = self.classifier(out)
         return logits
 
+# This module is used for GDAS-V1, its cell DAG is similar to DARTS
+class GDASCell(nn.Module):
+    def __init__():
+        pass
+    def forward():
+        pass
+    pass
 
 # build API
 
