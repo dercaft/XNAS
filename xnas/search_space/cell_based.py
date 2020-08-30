@@ -759,7 +759,7 @@ class GDASReductionCell(nn.Module):
             X2, X3 = drop_path_(X2, drop_prob,self.training), drop_path_(X3, drop_prob,self.training)
         return torch.cat([X0, X1, X2, X3], dim=1)
 class GDAS(DartsCNN):
-    def __init__(self, C=16, n_classes=10, n_layers=8, n_nodes=4, basic_op_list=[]，tau=10):
+    def __init__(self, C=16, n_classes=10, n_layers=8, n_nodes=4, basic_op_list=[], tau=10):
         super().__init__(C=16, n_classes=10, n_layers=8, n_nodes=4, basic_op_list=[])
         self.tau=tau
 
@@ -809,8 +809,12 @@ def _DartsCNN():
 def _GDAS():
     from xnas.core.config import cfg
     return GDAS(
-
-    )
+        C=cfg.SPACE.CHANNEL,
+        n_classes=cfg.SPACE.NUM_CLASSES,
+        n_layers=cfg.SPACE.LAYERS,
+        n_nodes=cfg.SPACE.NODES,
+        basic_op_list=cfg.SPACE.BASIC_OP,
+        tau= cfg.SPACE.tau)
 def _GDASFRC():
     from xnas.core.config import cfg
     return GDASFRC(
