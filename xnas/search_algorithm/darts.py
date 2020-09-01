@@ -77,6 +77,18 @@ class DartsCNNController(nn.Module):
         logits = self.forward(X)
         return self.criterion(logits, y)
 
+class GDASController(DartsCNNController):
+    def __init__(self, net, criterion, device_ids=None):
+        super().__init__(net,criterion,device_ids)
+
+        pass
+    def forward(self,x):
+        if len(self.device_ids) == 1:
+            return self.net.forwardGDAS(x, self.alpha)
+        else:
+            raise NotImplementedError
+        pass
+  
 
 class Architect():
     """ Compute gradients of alphas """

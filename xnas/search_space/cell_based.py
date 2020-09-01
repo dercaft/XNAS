@@ -25,7 +25,8 @@ OPS_ = {
 NON_PARAMETER_OP = ['none', 'avg_pool_3x3', 'max_pool_3x3', 'skip_connect']
 PARAMETER_OP = ['sep_conv_3x3', 'sep_conv_5x5', 'sep_conv_7x7', 'dil_conv_3x3',
                 'dil_conv_5x5', 'conv_7x1_1x7', 'nor_conv_3x3', 'nor_conv_1x1']
-
+GDAS_OP = ['none', 'skip_connect', 'avg_pool_3x3', 'max_pool_3x3',
+            'dil_conv_3x3', 'dil_conv_5x5', 'sep_conv_3x3', 'sep_conv_5x5']
 
 def get_op_index(op_list, parameter_list):
     op_idx_list = []
@@ -36,6 +37,9 @@ def get_op_index(op_list, parameter_list):
 
 
 def darts_weight_unpack(weight, n_nodes, input_nodes=2):
+    """
+        Unpack 2d weight matrix to dag
+    """
     w_dag = []
     start_index = 0
     end_index = input_nodes
@@ -44,7 +48,18 @@ def darts_weight_unpack(weight, n_nodes, input_nodes=2):
         start_index = end_index
         end_index += input_nodes + i + 1
     return w_dag
-
+def gdas_indexes_unpack(weight,n_nodes,input_nodes=2):
+    """
+        Unpack 1d indexes list to dag
+    """
+    w_dag = []
+    start_index = 0
+    end_index = input_nodes
+    for i in range(n_nodes):
+        w_dag.append(weight[start_index:end_index])
+        start_index = end_index
+        end_index += input_nodes + i + 1
+    return w_dag    
 
 def parse_from_numpy(alpha, k, basic_op_list=None):
     """
@@ -154,6 +169,23 @@ class PoolBN(nn.Module):
         out = self.bn(out)
         return out
 
+class POOLING(nn.Module):
+
+  def __init__(self, C_in, C_out, stride, mode, affine=True, track_running_stats=True):
+    super(POOLING, self).__init__()
+    if C_in == C_out:
+      self.preprocess = None
+    else:
+      self.preprocess = ReLUConvBN(C_in, C_out, 1, 1, 0, 1, affine, track_running_stats)
+    if mode == 'avg'  : self.op = nn.AvgPool2d(3, stride=stride, padding=1, count_include_pad=False)
+    elif mode == 'max': self.op = nn.MaxPool2d(3, stride=stride, padding=1)
+    else              : raise ValueError('Invalid mode={:} in POOLING'.format(mode))
+
+  def forward(self, inputs):
+    if self.preprocess: x = self.preprocess(inputs)
+    else              : x = inputs
+    return self.op(x)
+ 
 
 class StdConv(nn.Module):
     """ Standard conv
@@ -305,7 +337,23 @@ class _MixedOp(nn.Module):
             if 0 < value < 1:
                 _x.append(value * self._ops[i](x))
         return sum(_x)
-
+    def forwardDART(self,x,weights):
+        """
+        Args:
+            x: input
+            weights: weight for each operation
+        """
+        assert len(self._ops) == len(weights)
+        return sum(w*op(x) for w,op in zip(weights,self._ops))
+    def forwardGDAS(self,x,weights,index):
+        """
+        Args:
+            x: input
+            weights: weight for each operation
+            index: index of choosen op
+        """
+        assert len(self._ops) == len(weights)
+        return self._ops[index](x)*weights[index]
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -416,6 +464,20 @@ class DartsCell(nn.Module):
         for edges, w_list in zip(self.dag, w_dag):
             s_cur = sum(edges[i](s, w)
                         for i, (s, w) in enumerate(zip(states, w_list)))
+            states.append(s_cur)
+        s_out = torch.cat(states[2:], 1)
+        return s_out
+    def forwardGDAS(self,s0,s1,sample,indexs):
+        s0 = self.preproc0(s0)
+        s1 = self.preproc1(s1)
+
+        states = [s0, s1]
+        w_dag = darts_weight_unpack(sample, self.n_nodes)
+        i_dag = gdas_indexes_unpack(indexs, self.n_nodes)
+        for edges, w_list, i_list  in zip(self.dag, w_dag, i_dag):
+            # at thie moment, it should be int type
+            s_cur = sum(edges[i].forwardGDAS(s, w, it)
+                        for i, (s, w, it) in enumerate(zip(states, w_list, i_list)))
             states.append(s_cur)
         s_out = torch.cat(states[2:], 1)
         return s_out
@@ -532,7 +594,7 @@ class DartsCNN(nn.Module):
 
 
 # This module is used for NAS-Bench-201, represents a small search space with a complete DAG
-
+# Codes come from AutoDL-projects??
 
 class NAS201SearchCell(nn.Module):
 
@@ -643,7 +705,97 @@ class NASBench201CNN(nn.Module):
         logits = self.classifier(out)
         return logits
 
+# This module is used for GDAS-V1, its cell DAG is based on DARTS
+# GDAS(FRC) fixed reduction cell
+class GDASReductionCell(nn.Module):
+    def __init__(self,C_pp, C_p, C, reduction_p, affine, track_running_stats=True):
+        super(GDASReductionCell, self).__init__()
+        if reduction_p:
+            self.preproc0 = FactorizedReduce(C_pp, C, affine)
+        else:
+            self.preproc0 = ReLUConvBN(C_pp, C, 1, 1, 0, affine)
+        self.preproc1 = ReLUConvBN(C_p, C, 1, 1, 0, affine)
 
+        self.reduction = True
+        self.op1 = nn.ModuleList(
+                    [nn.Sequential(
+                        nn.ReLU(inplace=False),
+                        nn.Conv2d(C, C, (1, 3), stride=(1, 2), padding=(0, 1), groups=8, bias=not affine),
+                        nn.Conv2d(C, C, (3, 1), stride=(2, 1), padding=(1, 0), groups=8, bias=not affine),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats),
+                        nn.ReLU(inplace=False),
+                        nn.Conv2d(C, C, 1, stride=1, padding=0, bias=not affine),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats)),
+                    nn.Sequential(
+                        nn.ReLU(inplace=False),
+                        nn.Conv2d(C, C, (1, 3), stride=(1, 2), padding=(0, 1), groups=8, bias=not affine),
+                        nn.Conv2d(C, C, (3, 1), stride=(2, 1), padding=(1, 0), groups=8, bias=not affine),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats),
+                        nn.ReLU(inplace=False),
+                        nn.Conv2d(C, C, 1, stride=1, padding=0, bias=not affine),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats))])
+
+        self.op2 = nn.ModuleList(
+                    [nn.Sequential(
+                        nn.MaxPool2d(3, stride=2, padding=1),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats)),
+                    nn.Sequential(
+                        nn.MaxPool2d(3, stride=2, padding=1),
+                        nn.BatchNorm2d(C, affine=affine, track_running_stats=track_running_stats))])
+    @property
+    def forward(self,s0,s1, drop_prob = -1):
+        s0 = self.preproc0(s0)
+        s1 = self.preproc1(s1)
+
+        X0 = self.op1[0] (s0)
+        X1 = self.op1[1] (s1)
+        if drop_prob > 0.:
+            X0, X1 = drop_path_(X0, drop_prob,self.training), drop_path_(X1, drop_prob,self.training)
+
+        #X2 = self.ops2[0] (X0+X1)
+        X2 = self.op2[0] (s0)
+        X3 = self.op2[1] (s1)
+        if drop_prob > 0.:
+            X2, X3 = drop_path_(X2, drop_prob,self.training), drop_path_(X3, drop_prob,self.training)
+        return torch.cat([X0, X1, X2, X3], dim=1)
+class GDAS(DartsCNN):
+    def __init__(self, C=16, n_classes=10, n_layers=8, n_nodes=4, basic_op_list=[], tau=10):
+        super().__init__(C=16, n_classes=10, n_layers=8, n_nodes=4, basic_op_list=[])
+        self.tau=tau
+
+    def set_tau(self, tau):
+        self.tau = tau
+
+    def forwardGDAS(self,x,sample,select_i_type='max'):
+        def get_gumbel_prob(xins):
+            while True:
+                gumbels = -torch.empty_like(xins).exponential_().log()
+                logits  = (xins.log_softmax(dim=1) + gumbels) / self.tau
+                probs   = nn.functional.softmax(logits, dim=1)
+                index   = probs.max(-1, keepdim=True)[1]
+                one_h   = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+                hardwts = one_h - probs.detach() + probs
+                if (torch.isinf(gumbels).any()) or (torch.isinf(probs).any()) or (torch.isnan(probs).any()):
+                    print("Warning, stuck in gumbel prob")
+                    continue
+                else: break
+            return hardwts, index
+
+        n_weight,n_index=get_gumbel_prob(sample[0:self.num_edges])
+        r_weight,r_index=get_gumbel_prob(sample[self.num_edges: ])
+        s0=s1=self.stem(x)
+        for i , cell in enumerate(self.cells):
+            if cell.reduction: weight, index = r_weight, r_index 
+            else :             weight, index = n_weight, n_index
+            s0, s1 = s1, cell.forwardGDAS(s0,s1,weight,index)
+        out=self.gap(s1)
+        out=out.view(out.size(0),-1)
+        logits=self.linear(out)
+        return logits
+class GDASFRC(nn.Module):
+    def __init__(self):
+        pass
+    pass
 # build API
 
 def _DartsCNN():
@@ -654,7 +806,20 @@ def _DartsCNN():
         n_layers=cfg.SPACE.LAYERS,
         n_nodes=cfg.SPACE.NODES,
         basic_op_list=cfg.SPACE.BASIC_OP)
+def _GDAS():
+    from xnas.core.config import cfg
+    return GDAS(
+        C=cfg.SPACE.CHANNEL,
+        n_classes=cfg.SPACE.NUM_CLASSES,
+        n_layers=cfg.SPACE.LAYERS,
+        n_nodes=cfg.SPACE.NODES,
+        basic_op_list=cfg.SPACE.BASIC_OP,
+        tau= cfg.SPACE.tau)
+def _GDASFRC():
+    from xnas.core.config import cfg
+    return GDASFRC(
 
+    )
 
 def _NASbench201():
     from xnas.core.config import cfg
