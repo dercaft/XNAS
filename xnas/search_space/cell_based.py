@@ -48,7 +48,7 @@ def darts_weight_unpack(weight, n_nodes, input_nodes=2):
         start_index = end_index
         end_index += input_nodes + i + 1
     return w_dag
-def gdas_indexes_unpack(indexes,n_nodes,input_nodes=2):
+def gdas_indexes_unpack(weight,n_nodes,input_nodes=2):
     """
         Unpack 1d indexes list to dag
     """
@@ -787,7 +787,7 @@ class GDAS(DartsCNN):
         for i , cell in enumerate(self.cells):
             if cell.reduction: weight, index = r_weight, r_index 
             else :             weight, index = n_weight, n_index
-            s0, s1 = s1, cell.forwardGDAS(s0,s1,weights,index)
+            s0, s1 = s1, cell.forwardGDAS(s0,s1,weight,index)
         out=self.gap(s1)
         out=out.view(out.size(0),-1)
         logits=self.linear(out)
